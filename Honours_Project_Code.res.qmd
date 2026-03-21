@@ -1,0 +1,1141 @@
+---
+title: "Honours_Project"
+format: pdf
+editor: visual
+---
+
+```{r}
+library(igraph)
+library(ggraph)
+library(ggplot2)
+```
+# Plotting networks:
+
+```{r}
+plotnet <- function(network_generated){
+  net <- ggraph(network_generated,layout="fr")+geom_edge_link(alpha=0.5)+geom_node_point(size=1)+theme_void()
+  return(net)
+}
+```
+
+# Functions to generate networks
+
+kbar = 4, 6, 8 10
+
+#### Random network:
+
+```{r}
+randgraph <- function(nodes, kbar = NULL) {
+  
+  p <- kbar / (nodes - 1)
+  g <- sample_gnp(nodes, p, directed = FALSE, loops = FALSE)
+  return(g)
+}
+
+netrand <- randgraph(nodes=2^9,kbar=6)
+plotnet(netrand)
+edge_density(netrand)
+degree_vector <- degree(netrand)     
+degree_vector
+mean_degree <- mean(degree_vector)  
+mean_degree
+```
+
+#### Small-world network:
+
+```{r}
+#nei=Integer constant, the neighborhood within which the vertices of the lattice will be connected.p=Real constant between zero and one, the rewiring probability(from help function)
+smallworldgraph <- function(nodes, kbar = NULL, prob = 0.1) {
+  neighbours <- floor(kbar/2)
+  swg <- sample_smallworld(dim = 1, size = nodes, nei = neighbours, p = prob)
+  return(swg)
+}
+
+netsw <- smallworldgraph(nodes=2^9,kbar=10,prob=0.1)
+plotnet(netsw)
+edge_density(netsw)
+degree_vector <- degree(netsw)     
+degree_vector
+mean_degree <- mean(degree_vector)  
+mean_degree
+```
+
+#### Scale-free networks:
+
+```{r}
+#numeric constant = m (number of edges to add in each time step according to help function)
+scalefreegraph <- function(nodes, kbar = NULL) {
+
+  m <-floor(kbar/2)
+
+  sfg <- sample_pa(nodes, m=m, directed = FALSE, zero.appeal = 1)
+  
+  return(sfg)
+}
+
+net <- scalefreegraph(nodes=2^5,kbar=6)
+plotnet(net)
+edge_density(net)
+
+#testing
+degree_vector <- degree(net)     
+degree_vector
+mean_degree <- mean(degree_vector)  
+mean_degree
+
+```
+# Performing community detection:
+
+```{r}
+louvaincd <- function(network_gen, resolution=1){
+  cl <- cluster_louvain(network_gen, resolution=resolution)
+  
+  return(cl)
+}
+
+leidencd <- function(network_gen, resolution=1){
+  cl <- cluster_leiden(network_gen, resolution=resolution,objective_function = "modularity")
+ 
+  return(cl)}
+
+```
+
+# Metrics:
+
+## Modularity function: (used from igraph package)
+
+```{r}
+modularityll <- function(network_gen, cl_louvain = NULL, cl_leiden = NULL) {
+  
+  # Compute modularity for Louvain 
+  louvain_mod <- if (!is.null(cl_louvain)) modularity(network_gen, membership(cl_louvain)) else NA_real_
+  
+  # Compute modularity for Leiden 
+  leiden_mod  <- if (!is.null(cl_leiden)) modularity(network_gen, membership(cl_leiden)) else NA_real_
+  
+  data.frame(
+    modularity_louvain = louvain_mod,
+    modularity_leiden  = leiden_mod,
+    stringsAsFactors = FALSE
+  )
+}
+
+```
+
+## Conductance function:
+
+```{r}
+
+conductance_safe <- function(graph, group) {
+  # Return NA if group is empty or the whole graph
+  if (length(group) == 0 || length(group) == vcount(graph)) return(NA_real_)
+  
+  S <- V(graph)[group]
+  S_bar <- V(graph)[!V(graph) %in% S]
+  
+  # Number of edges crossing between S and S_bar
+  cut_edges <- ecount(graph) -
+               ecount(induced_subgraph(graph, S)) -
+               ecount(induced_subgraph(graph, S_bar))
+  
+  # Volumes (sum of degrees)
+  vol_S <- sum(degree(graph, S))
+  vol_Sbar <- sum(degree(graph, S_bar))
+  
+  cut_edges / min(vol_S, vol_Sbar)
+}
+
+conductancell <- function(network_gen, cl_louvain = NULL, cl_leiden = NULL) {
+  
+  safe_cond <- function(cl) {
+    if (is.null(cl)) return(NA_real_)
+    groups <- split(V(network_gen), membership(cl))
+    if (length(groups) <= 1) return(NA_real_)  # skip if only 1 community
+    vals <- vapply(groups, function(g) conductance_safe(network_gen, g), numeric(1))
+    mean(vals, na.rm = TRUE)
+  }
+  
+  data.frame(
+    conductance_louvain = safe_cond(cl_louvain),
+    conductance_leiden  = safe_cond(cl_leiden),
+    stringsAsFactors = FALSE
+  )
+}
+
+
+
+```
+
+## Stability function:
+
+```{r}
+
+if (!requireNamespace("aricode", quietly = TRUE)) {
+  install.packages("aricode")
+}
+library(aricode)
+
+normalize_membership <- function(mem) {
+  as.integer(factor(mem))
+}
+
+stability <- function(network_gen, n_runs, compare_method = "nmi", resolution = 1) {
+
+  results <- list()
+  
+  for (algo in c("louvain", "leiden")) {
+    communities <- vector("list", n_runs)
+    
+    for (i in 1:n_runs) {
+      cl_obj <- if (algo == "louvain") {
+        louvaincd(network_gen, resolution = resolution)
+      } else {
+        leidencd(network_gen, resolution = resolution)
+      }
+      
+      # Convert membership to integer labels
+      communities[[i]] <- normalize_membership(membership(cl_obj))
+    }
+    
+    similarities <- numeric(0)
+    
+    for (i in 1:(n_runs - 1)) {
+      for (j in (i + 1):n_runs) {
+        if (compare_method == "nmi") {
+          sim <- aricode::NMI(communities[[i]], communities[[j]])
+        } else if (compare_method == "ari") {
+          sim <- aricode::ARI(communities[[i]], communities[[j]])
+        } else {
+          stop("compare_method must be either 'nmi' or 'ari'")
+        }
+        similarities <- c(similarities, sim)
+      }
+    }
+    
+    results[[algo]] <- mean(similarities)
+  }
+  
+  return(c(stability_louvain = results$louvain,
+           stability_leiden  = results$leiden))
+}
+
+```
+
+
+SIZES TESTED AT: log_2(Size)
+
+3,4
+
+5,6
+
+7,8
+
+9,10
+
+## PARALLEL VERSIONS:
+
+#### Random network:
+
+```{r}
+if (!requireNamespace("future", quietly = TRUE)) {
+  install.packages("future")
+}
+if (!requireNamespace("future.apply", quietly = TRUE)) {
+  install.packages("future.apply")
+}
+library(future)
+library(future.apply)
+
+twosizes_random_parallel <- function(sizes = c(10, 15), n_runs = 100, stability_repeats = 100, resolutions = c(1), kbar = 1, workers = availableCores()) {
+  
+  
+  plan(multisession, workers = workers)
+  
+  
+  tasks <- expand.grid(
+    size = sizes,
+    run  = seq_len(n_runs),
+    res  = resolutions,
+    stringsAsFactors = FALSE
+  )
+  
+  
+  results_list <- future_lapply(seq_len(nrow(tasks)), function(idx) {
+    task <- tasks[idx, ]
+    size <- task$size
+    i    <- task$run
+    res  <- task$res
+    
+    set.seed(i)  
+    
+    #generate random network
+    g <- randgraph(size, kbar)
+    
+    #community detection
+    louvain <- louvaincd(g, resolution = res)
+    leiden  <- leidencd(g, resolution = res)
+    #metrics
+    mods <- modularityll(g, cl_louvain = louvain, cl_leiden = leiden)
+    cons <- conductancell(g, cl_louvain = louvain, cl_leiden = leiden)
+    stability_vals <- stability(g, n_runs = stability_repeats,resolution=res)
+    
+  
+    data.frame(
+      graph_size = size,
+      run = i,
+      network = "random",
+      kbar = kbar,
+      resolution = res,
+      number_of_communities_louvain = length(unique(membership(louvain))),
+      number_of_communities_leiden  = length(unique(membership(leiden))),
+      modularity_louvain  = mods$modularity_louvain[1],
+      modularity_leiden   = mods$modularity_leiden[1],
+      conductance_louvain = cons$conductance_louvain,
+      conductance_leiden  = cons$conductance_leiden,
+      stability_louvain = stability_vals["stability_louvain"],
+      stability_leiden  = stability_vals["stability_leiden"],
+      stringsAsFactors = FALSE
+    )
+    
+  }, future.seed = NA)  
+  df <- do.call(rbind, results_list)
+  
+ 
+  plan(sequential) 
+  
+  return(df)
+}
+
+
+size_pairs <- list(
+  c(16, 32),
+  c(64, 128),
+  c(256, 512)
+)
+kbars <- c(4, 6, 8, 10)
+resolutions <- seq(0.5, 5, by = 0.5)
+n_runs <- 100
+stability_repeats <- 50
+
+rds_file <- "res_results_random.rds"
+if (file.exists(rds_file)) {
+  df_all <- readRDS(rds_file)
+} else {
+  df_all <- data.frame()
+}
+
+
+for (k in kbars) {
+  
+  for (pair in size_pairs) {
+    
+    df_new <- twosizes_random_parallel(
+      sizes = pair,
+      n_runs = n_runs,
+      stability_repeats = stability_repeats,
+      resolutions = resolutions,
+      kbar = k
+    )
+  
+    df_all <- rbind(df_all, df_new)
+    saveRDS(df_all, rds_file)
+  }
+}
+
+```
+
+#### Small-world network:
+
+```{r}
+
+library(future)
+library(future.apply)
+
+twosizes_smallworld_parallel <- function(sizes = c(10, 15), p = 0.1, n_runs = 100, stability_repeats = 100, resolutions = c(1), kbar = 1, workers = availableCores()) {
+  
+ 
+  plan(multisession, workers = workers)
+  
+  
+  tasks <- expand.grid(
+    size = sizes,
+    run  = seq_len(n_runs),
+    res  = resolutions,
+    stringsAsFactors = FALSE
+  )
+  
+
+  results_list <- future_lapply(seq_len(nrow(tasks)), function(idx) {
+    task <- tasks[idx, ]
+    size <- task$size
+    i    <- task$run
+    res  <- task$res
+    
+    set.seed(i)  
+    
+    #generate small-world graph
+    g <- smallworldgraph(nodes=size,kbar=kbar, prob=p)
+    
+    #community detection
+    louvain <- louvaincd(g, resolution = res)
+    leiden  <- leidencd(g, resolution = res)
+    #metrics
+    mods <- modularityll(g, cl_louvain = louvain, cl_leiden = leiden)
+    cons <- conductancell(g, cl_louvain = louvain, cl_leiden = leiden)
+    stability_vals <- stability(g, n_runs = stability_repeats,resolution=res)
+    
+   
+    data.frame(
+      graph_size = size,
+      run = i,
+      network = "Small-world",
+      kbar = kbar,
+      resolution = res,
+      number_of_communities_louvain = length(unique(membership(louvain))),
+      number_of_communities_leiden  = length(unique(membership(leiden))),
+      modularity_louvain  = mods$modularity_louvain[1],
+      modularity_leiden   = mods$modularity_leiden[1],
+      conductance_louvain = cons$conductance_louvain,
+      conductance_leiden  = cons$conductance_leiden,
+      stability_louvain = stability_vals["stability_louvain"],
+      stability_leiden  = stability_vals["stability_leiden"],
+      stringsAsFactors = FALSE
+    )
+    
+  }, future.seed = NA)  
+ 
+  dfsw <- do.call(rbind, results_list)
+  
+
+  plan(sequential)
+  
+  return(dfsw)
+}
+size_pairs <- list(
+  c(16, 32),
+  c(64, 128),
+  c(256, 512)
+)
+
+kbars <- c(4, 6, 8, 10)
+resolutions <- seq(0.5, 5, by = 0.5)
+n_runs <- 100
+stability_repeats <- 50
+
+rds_file <- "res_results_smallworld.rds"
+if (file.exists(rds_file)) {
+  df_all <- readRDS(rds_file)
+} else {
+  df_all <- data.frame()
+}
+
+
+for (k in kbars) {
+  for (pair in size_pairs) {
+    
+    df_new <- twosizes_smallworld_parallel(
+      sizes = pair,
+      n_runs = n_runs,
+      stability_repeats = stability_repeats,
+      resolutions = resolutions,
+      kbar = k
+    )
+    df_all <- rbind(df_all, df_new)
+    saveRDS(df_all, rds_file)
+  }
+}
+```
+
+#### Scale-free network:
+
+```{r}
+library(future.apply)
+library(igraph)
+
+twosizes_scalefree_parallel <- function(sizes = c(10, 15), n_runs = 100,
+                                        stability_repeats = 50, resolutions = c(1), kbar = 1,
+                                        workers = availableCores()) {
+  
+  plan(multisession, workers = workers)  
+
+  process_graph <- function(size, i, res) {
+    set.seed(i)
+    #generate scale-free network
+    g <- scalefreegraph(size, kbar)
+    
+    #community detection
+    louvain <- louvaincd(g, resolution = res)
+    leiden  <- leidencd(g, resolution = res)
+    
+    #metrics
+    mods <- modularityll(g, cl_louvain = louvain, cl_leiden = leiden)
+    cons <- conductancell(g, cl_louvain = louvain, cl_leiden = leiden)
+    stability_vals <- stability(g, n_runs = stability_repeats,resolution=res)
+    
+    data.frame(
+      graph_size = size,
+      run = i,
+      network = "Scale-free",
+      kbar = kbar,
+      resolution = res,
+      number_of_communities_louvain = length(unique(membership(louvain))),
+      number_of_communities_leiden  = length(unique(membership(leiden))),
+      modularity_louvain  = mods$modularity_louvain,
+      modularity_leiden   = mods$modularity_leiden,
+      conductance_louvain = cons$conductance_louvain,
+      conductance_leiden  = cons$conductance_leiden,
+      stability_louvain   = stability_vals["stability_louvain"],
+      stability_leiden    = stability_vals["stability_leiden"],
+      stringsAsFactors = FALSE
+    )
+  }
+  
+  
+  all_combinations <- expand.grid(size = sizes, run = 1:n_runs, res = resolutions,
+                                  stringsAsFactors = FALSE)
+  
+
+  dfsf_list <- future.apply::future_lapply(1:nrow(all_combinations), function(idx) {
+    row <- all_combinations[idx, ]
+    process_graph(row$size, row$run, row$res)
+  },
+  future.seed = NA )
+  
+  
+  dfsf <- do.call(rbind, dfsf_list)
+  
+  return(dfsf)
+}
+
+size_pairs <- list(
+  c(16, 32),
+  c(64, 128),
+  c(256, 512)
+)
+kbars <- c(4, 6, 8, 10)
+resolutions <- seq(0.5, 5, by = 0.5)
+n_runs <- 100
+stability_repeats <- 50
+
+rds_file <- "res_results_scale_free.rds"
+if (file.exists(rds_file)) {
+  df_all <- readRDS(rds_file)
+} else {
+  df_all <- data.frame()
+}
+
+
+for (k in kbars) {
+  
+  for (pair in size_pairs) {
+    
+    df_new <- twosizes_scalefree_parallel(
+      sizes = pair,
+      n_runs = n_runs,
+      stability_repeats = stability_repeats,
+      resolutions = resolutions,
+      kbar = k
+    )
+    df_all <- rbind(df_all, df_new)
+    saveRDS(df_all, rds_file)
+  }
+}
+
+```
+
+## Modularity at different densities and sizes:
+
+```{r}
+library(dplyr)
+library(ggplot2)
+
+modularity_plot <- function(network_type, show_legend = FALSE) {
+  # Filter data for the specified network type
+  network_data <- dens_size_random|> filter(network == network_type)
+  
+  df_long <- tidyr::pivot_longer(
+    network_data,
+    cols = c(modularity_louvain, modularity_leiden),
+    names_to = "algorithm", 
+    values_to = "modularity"
+  )
+  
+  df_long$algorithm <- gsub("modularity_", "", df_long$algorithm)
+  df_long$log2_size <- log2(df_long$graph_size)
+  df_long$group <- interaction(df_long$algorithm, df_long$log2_size)
+  
+  # Define colors for algorithms
+  alg_colors <- c("louvain" = "#2A9D8F", "leiden" = "#F8766D")
+  
+  # Create plot with TWO geom_boxplot layers
+  p <- ggplot(df_long, aes(x = log2_size, y = modularity,
+                           fill = algorithm, color = algorithm, group = group)) +
+    
+    geom_boxplot(
+      alpha = 0.7,
+      position = position_dodge(width = 0.8),
+      outlier.shape = NA,  
+      median.colour = "black",
+      fatten=1
+    ) +
+   
+    geom_boxplot(
+      aes(fill = NULL, color = algorithm),  
+      position = position_dodge(width = 0.8),
+      outlier.shape = 16,
+      outlier.size = 1.5,
+      outlier.alpha = 0.8,
+      fatten = NULL,  
+      alpha = 0  
+    ) +
+    scale_fill_manual(values = alg_colors) +
+    scale_color_manual(values = alg_colors) +
+    facet_wrap(~ kbar, ncol = 2) +  
+    labs(
+      title = paste0("Average modularity on a ", network_type, 
+                     " network."),
+      x = expression(log[2]~"(Graph Size)"),
+      x = expression(log[2]~"(Graph Size)"),
+      y = "Average modularity",
+      fill = "Algorithm",
+      color = "Algorithm"
+    ) +
+    scale_x_continuous(
+      breaks = unique(df_long$log2_size),
+      labels = function(x) round(x, 1)
+    ) +
+    theme_minimal(base_size = 14) +
+    theme(
+      axis.text.x = element_text(angle = 0, hjust = 0.5)
+    )
+  
+  # Remove legend if not specified
+  if (!show_legend) {
+    p <- p + theme(legend.position = "none")
+  } else {
+    p <- p + theme(legend.position = "right")
+  }
+  
+  # Save individual plot
+  filename <- paste0("modularity_", tolower(gsub(" ", "_", network_type)), ".pdf")
+  ggsave(filename, plot = p, width = 12, height = 7)
+  
+  return(p)
+}
+
+
+random_plot <- modularity_plot("Random", show_legend = TRUE)
+#small_world_plot <- modularity_plot("Small-world", show_legend = TRUE)
+#scale_free_plot <- modularity_plot("Scale-free", show_legend = TRUE)
+
+print(random_plot)
+```
+
+## Conductance at different densites and sizes:
+
+```{r}
+library(ggplot2)
+library(dplyr)
+
+
+conductance_plot <- function(network_type, show_legend = FALSE) {
+  # Filter data for the specified network type
+  network_data <- dens_size_sf |> filter(network == network_type)
+  
+  df_long <- tidyr::pivot_longer(
+    network_data,
+    cols = c(conductance_louvain, conductance_leiden),
+    names_to = "algorithm",
+    values_to = "conductance"  
+  )
+  
+  df_long$algorithm <- gsub("conductance_", "", df_long$algorithm)  #
+  df_long$log2_size <- log2(df_long$graph_size)
+  df_long$group <- interaction(df_long$algorithm, df_long$log2_size)
+  
+  # Define colors for algorithms
+  alg_colors <- c("louvain" = "#2A9D8F", "leiden" = "#F8766D")
+  
+  # Create plot with TWO geom_boxplot layers
+  p <- ggplot(df_long, aes(x = log2_size, y = conductance,  
+                           fill = algorithm, color = algorithm, group = group)) +
+   
+    geom_boxplot(
+      alpha = 0.7,
+      position = position_dodge(width = 0.8),
+      outlier.shape = NA,  
+      median.colour = "black",
+      fatten=1
+    ) +
+   
+    geom_boxplot(
+      aes(fill = NULL, color = algorithm),  
+      position = position_dodge(width = 0.8),
+      outlier.shape = 16,
+      outlier.size = 1.5,  
+      outlier.alpha = 0.8,
+      fatten = NULL, 
+      alpha = 0 
+    ) +
+    scale_fill_manual(values = alg_colors) +
+    scale_color_manual(values = alg_colors) +
+    facet_wrap(~ kbar, ncol = 2) +  
+    labs(
+      title = paste0("Average conductance on a ", network_type, 
+                     " network."),
+      x = expression(log[2]~"(Graph Size)"),
+      y = "Average conductance",  
+      fill = "Algorithm",
+      color = "Algorithm"
+    ) +
+    scale_x_continuous(
+      breaks = unique(df_long$log2_size),
+      labels = function(x) round(x, 1)
+    ) +
+    theme_minimal(base_size = 14) +
+    theme(
+      axis.text.x = element_text(angle = 0, hjust = 0.5)
+    )
+  
+  # Remove legend if not specified
+  if (!show_legend) {
+    p <- p + theme(legend.position = "none")
+  } else {
+    p <- p + theme(legend.position = "right")
+  }
+  
+  # Save individual plot
+  filename <- paste0("conductance_", tolower(gsub(" ", "_", network_type)), ".pdf")
+  ggsave(filename, plot = p, width = 12, height = 7)
+  
+  return(p)
+}
+
+
+#random_plot <- conductance_plot("Random", show_legend = TRUE)
+#small_world_plot <- conductance_plot("Small-world", show_legend = TRUE)
+scale_free_plot <- conductance_plot("Scale-free", show_legend = TRUE)
+
+print(small_world_plot)
+
+min(dens_size_sw$stability_louvain)
+min(dens_size_sf$conductance_louvain)
+```
+
+## Stability at different sizes and densities
+
+```{r}
+library(ggplot2)
+library(dplyr)
+
+stability_plot <- function(network_type, show_legend = FALSE) {
+  # Filter data for the specified network type
+  network_data <- dens_size_sf |> filter(network == network_type)
+  
+  df_long <- tidyr::pivot_longer(
+    network_data,
+    cols = c(stability_louvain, stability_leiden),  
+    names_to = "algorithm",
+    values_to = "stability"  
+  )
+  
+  df_long$algorithm <- gsub("stability_", "", df_long$algorithm)  
+  df_long$log2_size <- log2(df_long$graph_size)
+  df_long$group <- interaction(df_long$algorithm, df_long$log2_size)
+  
+  # Define colors for algorithms
+  alg_colors <- c("louvain" = "#2A9D8F", "leiden" = "#F8766D")
+  
+
+  p <- ggplot(df_long, aes(x = log2_size, y = stability,  
+                           fill = algorithm, color = algorithm, group = group)) +
+  
+    geom_boxplot(
+      alpha = 0.7,
+      position = position_dodge(width = 0.8),
+      outlier.shape = NA,  
+      median.colour = "black", 
+      fatten = 1 
+    ) +
+  
+    geom_boxplot(
+      aes(fill = NULL, color = algorithm),  
+      position = position_dodge(width = 0.8),
+      outlier.shape = 16,
+      outlier.size = 1.5,  
+      outlier.alpha = 0.8,
+      fatten = NULL,  
+      alpha = 0  
+    ) +
+    scale_fill_manual(values = alg_colors) +
+    scale_color_manual(values = alg_colors) +
+    facet_wrap(~ kbar, ncol = 2) +  
+    labs(
+      title = paste0("Average stability on a ", network_type, 
+                     " network."),
+      x = expression(log[2]~"(Graph Size)"),
+      y = "Average stability (NMI)",  
+      fill = "Algorithm",
+      color = "Algorithm"
+    ) +
+    scale_x_continuous(
+      breaks = unique(df_long$log2_size),
+      labels = function(x) round(x, 1)
+    ) +
+    theme_minimal(base_size = 14) +
+    theme(
+      axis.text.x = element_text(angle = 0, hjust = 0.5)
+    )
+  
+  # Remove legend if not specified
+  if (!show_legend) {
+    p <- p + theme(legend.position = "none")
+  } else {
+    p <- p + theme(legend.position = "right")
+  }
+  
+  # Save individual plot
+  filename <- paste0("stability_", tolower(gsub(" ", "_", network_type)), ".pdf")
+  ggsave(filename, plot = p, width = 12, height = 7)
+  
+  return(p)
+}
+
+#random_plot <- stability_plot("Random", show_legend = TRUE)
+#small_world_plot <- stability_plot("Small-world", show_legend = TRUE)
+scale_free_plot <- stability_plot("Scale-free", show_legend = TRUE)
+
+print(scale_free_plot)
+#print(small_world_plot)
+```
+
+# MODULARITY WITH RES AND DENSITY
+
+```{r}
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+
+
+create_modularity_plot <- function(df_all, kbar_val, network_type) {
+  # Filter data
+  df_filtered <- df_all |>
+    filter(kbar == kbar_val, network == network_type)
+ 
+  # Prepare modularity data
+  mod_long <- df_filtered |>
+    select(graph_size, resolution, modularity_louvain, modularity_leiden) |>
+    pivot_longer(
+      cols = starts_with("modularity"),
+      names_to = "algorithm",
+      values_to = "modularity"
+    ) |>
+    mutate(
+      algorithm = gsub("modularity_", "", algorithm)
+    )
+  
+  # Prepare communities data
+  comm_long <- df_filtered |>
+    select(graph_size, resolution, number_of_communities_louvain, number_of_communities_leiden) |>
+    pivot_longer(
+      cols = starts_with("number_of_communities"),
+      names_to = "algorithm",
+      values_to = "communities"
+    ) |>
+    mutate(
+      algorithm = gsub("number_of_communities_", "", algorithm)
+    )
+  
+  # Join modularity and communities data
+  df_combined <- mod_long |>
+    left_join(comm_long, by = c("graph_size", "resolution", "algorithm"))
+  
+  # Summarise
+  df_summary <- df_combined |>
+    group_by(graph_size, resolution, algorithm) |>
+    summarise(
+      mean_modularity = mean(modularity),
+      mean_communities = mean(communities),
+      .groups = "drop"
+    )
+  
+  # Determine if the line is the lowest at each resolution & size
+  df_summary <- df_summary |>
+    group_by(graph_size, resolution) |>
+    mutate(
+      is_bottom = mean_modularity == min(mean_modularity)
+    ) |>
+    ungroup() |>
+    mutate(
+      algorithm_label = paste0(algorithm, " (modularity)"),
+      point_shape = "Average number of communities"
+    )
+  
+  # Plot
+  p <- ggplot(df_summary, aes(x = resolution, y = mean_modularity, color = algorithm_label)) +
+    geom_line(linewidth = 1, alpha = 0.7, aes(group = algorithm_label)) +
+    geom_point(aes(shape = point_shape), size = 2, alpha = 0.7) +
+    geom_text(
+      aes(
+        label = round(mean_communities),
+        vjust = ifelse(is_bottom, 1.3, -0.7)
+      ),
+      hjust = 0.5,
+      size = 3.5,
+      fontface = "bold",
+      show.legend = FALSE
+    ) +
+    facet_wrap(~ graph_size, nrow = 2) +
+    coord_cartesian(clip = "off") +
+    scale_shape_manual(
+      name = NULL,
+      values = c("Average number of communities" = 16)
+    ) +
+    labs(
+      title = paste0("Average modularity on a ", network_type, 
+                     " network at a mean degree of ", kbar_val,"."),
+      x = "Resolution",
+      y = "Average modularity",
+      color = "Algorithm"
+    ) +
+    theme_minimal() +
+    theme(
+      strip.text = element_text(face = "bold"),
+      plot.title = element_text(hjust = 0.5, size = 14),
+      plot.subtitle = element_text(hjust = 0.5, size = 10),
+      legend.position = "right"
+    )
+  
+  # Save
+  filename <- paste0("modularity_", kbar_val, "_", network_type, ".pdf")
+  ggsave(filename, plot = p, width = 10, height = 7)
+  
+  return(p)
+}
+
+df_all <- readRDS("res_results_random.rds")
+rownames(df_all) <- NULL
+plot_0.2 <- create_modularity_plot(df_all,4, "Random")
+plot_0.4 <- create_modularity_plot(df_all,6, "Random")
+plot_0.6 <- create_modularity_plot(df_all,8, "Random")
+plot_0.8 <- create_modularity_plot(df_all,10, "Random")
+plot_0.2
+plot_0.4
+plot_0.6
+plot_0.8
+
+df_all <- readRDS("res_results_smallworld.rds")
+rownames(df_all) <- NULL
+
+plot_0.2 <- create_modularity_plot(df_all,4, "Small-world")
+plot_0.4 <- create_modularity_plot(df_all,6, "Small-world")
+plot_0.6 <- create_modularity_plot(df_all,8, "Small-world")
+plot_0.8 <- create_modularity_plot(df_all,10, "Small-world")
+plot_0.2
+plot_0.4
+plot_0.6
+plot_0.8
+
+df_all <- readRDS("res_results_scale_free.rds")
+rownames(df_all) <- NULL
+plot_0.2 <- create_modularity_plot(df_all,4, "Scale-free")
+plot_0.4 <- create_modularity_plot(df_all,6, "Scale-free")
+plot_0.6 <- create_modularity_plot(df_all,8, "Scale-free")
+plot_0.8 <- create_modularity_plot(df_all,10, "Scale-free")
+
+
+```
+
+# CONDUCTANCE
+
+```{r}
+create_conductance_plot <- function(df_all, kbar_val, network_type) {
+  df_filtered <- df_all |>
+    filter(kbar == kbar_val, network == network_type)
+  
+  conductance_long <- df_filtered |>
+    select(graph_size, resolution, conductance_louvain, conductance_leiden) |>
+    pivot_longer(cols = starts_with("conductance"), names_to = "algorithm", values_to = "conductance") |>
+    mutate(algorithm = gsub("conductance_", "", algorithm))
+  
+  comm_long <- df_filtered |>
+    select(graph_size, resolution, number_of_communities_louvain, number_of_communities_leiden) |>
+    pivot_longer(cols = starts_with("number_of_communities"), names_to = "algorithm", values_to = "communities") |>
+    mutate(algorithm = gsub("number_of_communities_", "", algorithm))
+  
+  df_combined <- left_join(conductance_long, comm_long, by = c("graph_size", "resolution", "algorithm"))
+  
+  df_summary <- df_combined |>
+    group_by(graph_size, resolution, algorithm) |>
+    summarise(mean_conductance = mean(conductance),
+              mean_communities = mean(communities), .groups = "drop") |>
+    group_by(graph_size, resolution) |>
+    mutate(is_bottom = mean_conductance == min(mean_conductance)) |>
+    ungroup() |>
+    mutate(
+      algorithm_label = paste0(algorithm, " (conductance)"),
+      point_shape = "Average number of communities"
+    )
+  
+  p <- ggplot(df_summary, aes(x = resolution, y = mean_conductance, color = algorithm_label)) +
+    geom_line(linewidth = 1, alpha = 0.7) +
+    geom_point(aes(shape = point_shape), size = 2, alpha = 0.7) +
+    geom_text(
+      aes(label = round(mean_communities), vjust = ifelse(is_bottom, 1.3, -0.7)),
+      hjust = 0.5,
+      size = 3.5,
+      fontface = "bold",
+      show.legend = FALSE
+    ) +
+    facet_wrap(~ graph_size, nrow = 2) +
+    coord_cartesian(clip = "off") +
+    scale_shape_manual(name = NULL, values = c("Average number of communities" = 16)) +
+    labs(
+      title = paste0("Average conductance on a ", network_type, 
+                     " network at a mean degree of ", kbar_val,"."),
+      x = "Resolution", y = "Average conductance", color = "Algorithm"
+    ) +
+    theme_minimal() +
+    theme(
+      strip.text = element_text(face = "bold"),
+      plot.title = element_text(hjust = 0.5, size = 14),
+      plot.subtitle = element_text(hjust = 0.5, size = 10),
+      legend.position = "right"
+    )
+  
+  ggsave(paste0("conductance_", kbar_val, "_", network_type, ".pdf"), plot = p, width = 10, height = 7)
+  return(p)
+}
+df_all <- readRDS("res_results_random.rds")
+rownames(df_all) <- NULL
+
+plot_0.2 <- create_conductance_plot(df_all,4, "Random")
+plot_0.4 <- create_conductance_plot(df_all,6, "Random")
+plot_0.6 <- create_conductance_plot(df_all,8, "Random")
+plot_0.8 <- create_conductance_plot(df_all,10, "Random")
+plot_0.2
+plot_0.4
+plot_0.6
+plot_0.8
+
+df_all <- readRDS("res_results_smallworld.rds")
+rownames(df_all) <- NULL
+
+plot_0.2 <- create_conductance_plot(df_all,4, "Small-world")
+plot_0.4 <- create_conductance_plot(df_all,6, "Small-world")
+plot_0.6 <- create_conductance_plot(df_all,8, "Small-world")
+plot_0.8 <- create_conductance_plot(df_all,10, "Small-world")
+plot_0.2
+plot_0.4
+plot_0.6
+plot_0.8
+
+df_all <- readRDS("res_results_scale_free.rds")
+rownames(df_all) <- NULL
+plot_0.2 <- create_conductance_plot(df_all,4, "Scale-free")
+plot_0.4 <- create_conductance_plot(df_all,6, "Scale-free")
+plot_0.6 <- create_conductance_plot(df_all,8, "Scale-free")
+plot_0.8 <- create_conductance_plot(df_all,10, "Scale-free")
+
+
+
+```
+
+# STABILITY
+
+```{r}
+library(dplyr)
+library(tidyr)
+
+create_stability_plot <- function(df_all, kbar_val, network_type) {
+  df_filtered <- df_all |>
+    filter(kbar == kbar_val, network == network_type)
+  
+  stability_long <- df_filtered |>
+    select(graph_size, resolution, stability_louvain, stability_leiden) |>
+    pivot_longer(cols = starts_with("stability"), names_to = "algorithm", values_to = "stability") |>
+    mutate(algorithm = gsub("stability_", "", algorithm))
+  
+  comm_long <- df_filtered |>
+    select(graph_size, resolution, number_of_communities_louvain, number_of_communities_leiden) |>
+    pivot_longer(cols = starts_with("number_of_communities"), names_to = "algorithm", values_to = "communities") |>
+    mutate(algorithm = gsub("number_of_communities_", "", algorithm))
+  
+  df_combined <- left_join(stability_long, comm_long, by = c("graph_size", "resolution", "algorithm"))
+  
+  df_summary <- df_combined |>
+    group_by(graph_size, resolution, algorithm) |>
+    summarise(mean_stability = mean(stability),
+              mean_communities = mean(communities), .groups = "drop") |>
+    group_by(graph_size, resolution) |>
+    mutate(is_bottom = mean_stability == min(mean_stability)) |>
+    ungroup() |>
+    mutate(
+      algorithm_label = paste0(algorithm, " (stability)"),
+      point_shape = "Average number of communities"
+    )
+  
+  p <- ggplot(df_summary, aes(x = resolution, y = mean_stability, color = algorithm_label)) +
+    geom_line(linewidth = 1, alpha = 0.7) +
+    geom_point(aes(shape = point_shape), size = 2, alpha = 0.7) +
+    geom_text(
+      aes(label = round(mean_communities), vjust = ifelse(is_bottom, 1.3, -0.7)),
+      hjust = 0.5,
+      size = 3.5,
+      fontface = "bold",
+      show.legend = FALSE
+    ) +
+    facet_wrap(~ graph_size, nrow = 2) +
+    coord_cartesian(clip = "off") +
+    scale_shape_manual(name = NULL, values = c("Average number of communities" = 16)) +
+    labs(
+      title = paste0("Average stability on a ", network_type, 
+                     " network at a mean degree of ", kbar_val,"."),
+      x = "Resolution", y = "Average stability(NMI)", color = "Algorithm"
+    ) +
+    theme_minimal() +
+    theme(
+      strip.text = element_text(face = "bold"),
+      plot.title = element_text(hjust = 0.5, size = 14),
+      plot.subtitle = element_text(hjust = 0.5, size = 10),
+      legend.position = "right"
+    )
+  
+  ggsave(paste0("stability_", kbar_val, "_", network_type, ".pdf"), plot = p, width = 10, height = 8)
+  return(p)
+}
+
+
+df_all <- readRDS("res_results_random.rds")
+rownames(df_all) <- NULL
+plot_0.2 <- create_stability_plot (df_all,4, "Random")
+plot_0.4 <- create_stability_plot (df_all,6, "Random")
+plot_0.6 <- create_stability_plot(df_all,8, "Random")
+plot_0.8 <- create_stability_plot(df_all,10, "Random")
+plot_0.2
+plot_0.4
+plot_0.6
+plot_0.8
+
+df_all <- readRDS("res_results_smallworld.rds")
+rownames(df_all) <- NULL
+
+plot_0.2 <- create_stability_plot(df_all,4, "Small-world")
+plot_0.4 <- create_stability_plot(df_all,6, "Small-world")
+plot_0.6 <- create_stability_plot(df_all,8, "Small-world")
+plot_0.8 <- create_stability_plot(df_all,10, "Small-world")
+plot_0.2
+plot_0.4
+plot_0.6
+plot_0.8
+
+df_all <- readRDS("res_results_scale_free.rds")
+rownames(df_all) <- NULL
+plot_0.2 <- create_stability_plot(df_all,4, "Scale-free")
+plot_0.4 <- create_stability_plot(df_all,6, "Scale-free")
+plot_0.6 <- create_stability_plot(df_all,8, "Scale-free")
+plot_0.8 <- create_stability_plot(df_all,10, "Scale-free")
+
+
+
+```
